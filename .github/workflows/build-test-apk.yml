@@ -1,0 +1,63 @@
+# Builds a test APK (debug-signed, no release secrets needed) and uploads it as a workflow artifact.
+name: Build test APK
+
+on:
+  push:
+    branches: [adreno-720]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Install SDK components
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-36" "build-tools;35.0.0" "ndk;27.3.13750724" "cmake;3.22.1" > /dev/null
+
+      - name: Fetch bundled components
+        run: tools/fetch_components.sh
+
+      - name: Remove 32-bit Windows files from Proton
+        run: |
+          command -v zstd > /dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq zstd > /dev/null; }
+          python3 tools/trim_proton_i386.py app/src/main/assets/bundled_components/proton-11.0-90624-arm64ec.wcp
+
+      - name: Build the browser-login helper
+        if: hashFiles('tools/wow-session-bridge/build.sh') != ''
+        env:
+          LLVM_MINGW: llvm-mingw-20261104-ucrt-ubuntu-22.04-x86_64
+          LLVM_MINGW_SHA256: 919380403de87dca3c581c2053230cd298af5e891286628ba0613b7fed370926
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/llvm-mingw.tar.xz" \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/20261104/$LLVM_MINGW.tar.xz"
+          echo "$LLVM_MINGW_SHA256  $RUNNER_TEMP/llvm-mingw.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/llvm-mingw.tar.xz" -C "$RUNNER_TEMP"
+          sh tools/wow-session-bridge/build.sh "$RUNNER_TEMP/$LLVM_MINGW/bin/aarch64-w64-mingw32-clang" \
+            app/src/main/assets/wow-session-bridge.exe
+
+      - name: Write local.properties
+        run: echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      - name: Build
+        run: ./gradlew --no-daemon :app:assembleModernRelease
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WoW-Forever-adreno720
+          path: app/build/outputs/apk/modern/release/app-modern-release.apk
+          retention-days: 14
